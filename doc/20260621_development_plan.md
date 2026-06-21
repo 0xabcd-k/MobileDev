@@ -45,7 +45,7 @@
 
 ```
 Connection {
-    ID       string    // 唯一标识，此标识为agent、client安装时生成的uuid
+    ID       string    // 唯一标识
     Type     string    // "agent" | "client"
     Name     string    // agent 名称（agent 连接时上报，此名称在agent配置中）
     Conn     *websocket.Conn
@@ -98,7 +98,7 @@ message Message {
 | `plugin.delete.resp` | agent → server → client                            | 删除结果 |
 | `plugin.domain` | client → server → agent                            | 获取插件前端端点 |
 | `plugin.domain.resp` | agent → server → client                            | 返回端点地址 |
-| `plugin.do` | client → server → agent | 启动插件会话，附带初始指令（生成 sid） |
+| `plugin.do` | client → server → agent | 启动插件会话，附带初始指令（client 生成 sid 并携带） |
 | `plugin.do.input` | client → server → agent | 会话中发送后续输入（回答问题、审批权限等） |
 | `plugin.do.stream` | agent → server → client | 流式返回插件输出 |
 | `plugin.do.cancel` | client → server → agent | 中断正在执行的会话 |
@@ -174,12 +174,12 @@ plugins/
 | 命令 | 调用方式 | 说明 |
 |------|----------|------|
 | `--health` | `./main --health` | 返回 `{"status":"ok"}` 表示健康 |
-| `--domain` | `./main --domain` | 返回前端端点 URL |
+| `--domain` | `./main --domain` | 返回前端端点 URL（必须是公网可访问的地址） |
 | `--do` | `./main --do` | 进入交互模式，agent 持续转发 stdin/stdout |
 
-`--do` 模式下（每次调用对应一个 sid 会话）：
-- 收到 `plugin.do` 时启动子进程，将初始 payload 写入 stdin
-- 收到 `plugin.do.input` 时将后续输入写入同一子进程的 stdin（通过 sid 匹配）
+`--do` 模式下（每次调用对应一个 sid 会话，sid 由 client 生成并随 `plugin.do` 消息携带）：
+- 收到 `plugin.do` 时根据消息中的 sid 建立会话，启动子进程 `./main --do`，将初始 payload 写入 stdin
+- 收到 `plugin.do.input` 时按 sid 查找对应子进程，将后续输入写入 stdin
 - 读取子进程 stdout，逐块通过 `plugin.do.stream` 流式转发回 client
 - 收到 `plugin.do.cancel` 时 kill 该 sid 对应的子进程
 - 子进程退出时发送 `plugin.do.done`
@@ -246,11 +246,15 @@ plugins/
 
 **实施内容：**
 1. 初始化 Go module：`go mod init mobiledev/server`
-2. 实现 `config` 模块：解析命令行参数 `--port`、`--password`
-3. 实现 `cert` 模块：自动生成自签名 TLS 证书（RSA 2048，有效期 1 年），保存到磁盘供复用
-4. 实现 `auth` 中间件：校验 `Authorization: Bearer sha256(password)` header
-5. 实现健康检查端点 `GET /health`
-6. 启动 HTTPS 服务
+2. 编写 `proto/message.proto` 定义消息协议，使用 `protoc` 生成 Go 代码到 `server/protocol/` 目录：
+   ```bash
+   protoc --go_out=server/protocol --go_opt=paths=source_relative proto/message.proto
+   ```
+3. 实现 `config` 模块：解析命令行参数 `--port`、`--password`
+4. 实现 `cert` 模块：自动生成自签名 TLS 证书（RSA 2048，有效期 1 年），保存到磁盘供复用
+5. 实现 `auth` 中间件：校验 `Authorization: Bearer sha256(password)` header
+6. 实现健康检查端点 `GET /health`
+7. 启动 HTTPS 服务
 
 **自测用例：**
 | # | 用例 | 预期结果 |
@@ -320,7 +324,8 @@ plugins/
 
 **实施内容：**
 1. 初始化 Go module：`go mod init mobiledev/agent`
-2. 实现 `config` 模块：解析 `--server`、`--password`、`--name`、`--plugin-dir` 参数
+2. 使用 `protoc` 从 `proto/message.proto` 生成 Go 代码到 `agent/protocol/` 目录（与 server 共享同一 proto 定义）
+3. 实现 `config` 模块：解析 `--server`、`--password`、`--name`、`--plugin-dir` 参数
 3. 实现 `client` 模块：WSS 连接 server，支持忽略自签名证书
 4. 实现断线重连：指数退避策略（1s、2s、4s...最大 30s）
 5. 实现 `handler` 模块：消息分发框架
@@ -374,7 +379,7 @@ plugins/
 
 **实施内容：**
 1. 实现 `executor` 模块（按 sid 管理会话）
-   - 收到 `plugin.do` 时生成 sid，启动子进程 `./main --do`，将初始 payload 写入 stdin
+   - 收到 `plugin.do` 时使用 client 携带的 sid 建立会话，启动子进程 `./main --do`，将初始 payload 写入 stdin
    - 收到 `plugin.do.input` 时按 sid 查找对应子进程，将后续输入写入 stdin
    - 读取子进程 stdout，逐块通过 WSS 发送 `plugin.do.stream` 消息给 client（携带 sid）
    - 收到 `plugin.do.cancel` 时按 sid 查找并 kill 对应子进程
@@ -403,7 +408,11 @@ plugins/
 
 **实施内容：**
 1. 创建 Flutter 项目 `flutter create client`
-2. 实现 `config` 模块：使用 SharedPreferences 存储 server 地址和密码
+2. 使用 `protoc` 从 `proto/message.proto` 生成 Dart 代码到 `client/lib/protocol/` 目录：
+   ```bash
+   protoc --dart_out=client/lib/protocol proto/message.proto
+   ```
+3. 实现 `config` 模块：使用 SharedPreferences 存储 server 地址和密码
 3. 实现 `ws_client` 模块：
    - WSS 连接（支持自签名证书）
    - 消息发送/接收
@@ -471,7 +480,7 @@ plugins/
 1. 实现 PluginPage：
    - 进入时发送 `plugin.domain` 获取前端端点 URL
    - 使用 `webview_flutter` 加载该 URL
-   - 进入时发送 `plugin.do` 启动会话，记录返回的 sid
+   - 进入时生成 sid（UUID），发送 `plugin.do`（携带 sid）启动会话
 2. 实现 JS Bridge：
    - Flutter 端注入 JS 对象 `MobileDev`
    - `MobileDev.send(data)`：插件前端调用此方法，Flutter 通过 WSS 发送 `plugin.do.input`（携带 sid）给 agent 侧插件
@@ -564,6 +573,8 @@ MobileDev/
 ├── doc/                          # 文档
 │   ├── 20260620_design.md        # 设计文档
 │   └── 20260621_development_plan.md  # 本开发方案
+├── proto/                        # Protobuf 定义（三端共享）
+│   └── message.proto
 ├── server/                       # Go - 中继服务器
 │   ├── go.mod
 │   ├── main.go
@@ -580,10 +591,12 @@ MobileDev/
 │   ├── api/
 │   │   └── handler.go
 │   └── protocol/
-│       └── message.go
+│       └── message.pb.go        # 由 protoc 生成，勿手动修改
 ├── agent/                        # Go - 代理
 │   ├── go.mod
 │   ├── main.go
+│   ├── protocol/
+│   │   └── message.pb.go        # 由 protoc 生成，勿手动修改
 │   ├── config/
 │   │   └── config.go
 │   ├── client/
@@ -597,6 +610,8 @@ MobileDev/
 ├── client/                       # Flutter - 客户端
 │   ├── lib/
 │   │   ├── main.dart
+│   │   ├── protocol/
+│   │   │   └── message.pb.dart  # 由 protoc 生成，勿手动修改
 │   │   ├── config/
 │   │   │   └── app_config.dart
 │   │   ├── models/
@@ -630,6 +645,7 @@ MobileDev/
 | 依赖 | 用途 |
 |------|------|
 | `github.com/gorilla/websocket` | WebSocket 实现 |
+| `google.golang.org/protobuf` | Protobuf 运行时库 |
 | 标准库 `crypto/tls`, `crypto/x509` | 自签名证书 |
 | 标准库 `os/exec` | 子进程管理 |
 | 标准库 `archive/tar`, `compress/gzip`, `archive/zip` | 插件解压 |
@@ -640,9 +656,18 @@ MobileDev/
 |------|------|
 | `http` / `dio` | HTTPS REST 请求（查询 agent 列表等） |
 | `web_socket_channel` | WebSocket 通信 |
+| `protobuf` | Protobuf 运行时（Dart） |
 | `webview_flutter` | 插件前端加载 |
 | `shared_preferences` | 配置持久化 |
 | `provider` | 状态管理 |
+
+### 开发工具链
+
+| 工具 | 用途 |
+|------|------|
+| `protoc` | Protobuf 编译器 |
+| `protoc-gen-go` | Go 代码生成插件（`google.golang.org/protobuf/cmd/protoc-gen-go`） |
+| `protoc-gen-dart` | Dart 代码生成插件（`dart pub global activate protoc_plugin`） |
 
 ---
 
@@ -653,3 +678,4 @@ MobileDev/
 3. **插件安全性**：插件是任意可执行程序，需要在文档中明确告知用户风险。当前阶段不做沙箱隔离，依赖用户自行管理可信插件源。
 4. **消息乱序**：WSS 本身保序，但多个 client 并发操作同一 agent 时，需要通过消息中的请求 ID 关联请求和响应。
 5. **大文件传输**：当前设计基于 WebSocket 文本消息，不适合大文件传输。如有需求后续可扩展 Binary Frame 或独立 HTTP 通道。
+6. **插件前端端点必须公网可访问**：`--domain` 返回的 URL 是 client 端 WebView 直接加载的地址，因此必须是公网可访问的（如部署在 CDN、云服务器等）。`localhost` 地址仅限开发测试时 client 与 agent 在同一台机器上使用。插件的数据通信仍然走 WSS 中继（通过 JS Bridge），`--domain` 返回的地址仅用于加载前端 UI 静态资源。
