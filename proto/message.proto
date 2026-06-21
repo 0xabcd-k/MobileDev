@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package message;
+
+option go_package = "mobiledev/server/protocol;protocol";
+
+message Message {
+  string from = 1;
+  string to = 2;
+  string type = 3;
+  string action = 4;
+  string sid = 5;
+  bytes payload = 6;
+}
