@@ -33,6 +33,10 @@ func (a Authenticator) ValidBearer(header string) bool {
 		return false
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	return a.ValidToken(token)
+}
+
+func (a Authenticator) ValidToken(token string) bool {
 	if len(token) != len(a.expectedToken) {
 		return false
 	}

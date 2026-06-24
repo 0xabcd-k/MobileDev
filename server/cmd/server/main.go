@@ -12,6 +12,8 @@ import (
 	"mobiledev/server/internal/auth"
 	"mobiledev/server/internal/cert"
 	"mobiledev/server/internal/config"
+	"mobiledev/server/internal/hub"
+	"mobiledev/server/internal/ws"
 )
 
 func main() {
@@ -37,8 +39,14 @@ func run(args []string) error {
 	}
 
 	authenticator := auth.New(cfg.Password)
+	connectionHub := hub.New()
+	wsServer := ws.New(authenticator, connectionHub)
+
 	mux := http.NewServeMux()
 	mux.Handle("/health", authenticator.Middleware(http.HandlerFunc(healthHandler)))
+	mux.Handle("/api/agents", authenticator.Middleware(agentsHandler(connectionHub)))
+	mux.HandleFunc("/ws/agent", wsServer.HandleAgent)
+	mux.HandleFunc("/ws/client", wsServer.HandleClient)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
@@ -59,4 +67,11 @@ func run(args []string) error {
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func agentsHandler(connectionHub *hub.Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(connectionHub.Agents())
+	}
 }
