@@ -3,6 +3,7 @@ package ws
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -10,9 +11,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"google.golang.org/protobuf/proto"
 
 	"mobiledev/server/internal/auth"
 	"mobiledev/server/internal/hub"
+	"mobiledev/server/protocol"
 )
 
 const (
@@ -104,9 +107,77 @@ func (s *Server) serve(connection *hub.Connection) {
 	defer close(done)
 
 	for {
-		if _, _, err := connection.Conn.NextReader(); err != nil {
+		messageType, data, err := connection.Conn.ReadMessage()
+		if err != nil {
 			return
 		}
+		if messageType != websocket.BinaryMessage {
+			s.sendError(connection, "only binary protobuf websocket messages are supported")
+			continue
+		}
+		s.routeMessage(connection, data)
+	}
+}
+
+func (s *Server) routeMessage(sender *hub.Connection, data []byte) {
+	var msg protocol.Message
+	if err := proto.Unmarshal(data, &msg); err != nil {
+		s.sendError(sender, "invalid protobuf message")
+		return
+	}
+
+	msg.From = sender.ID
+	if msg.Type == "" {
+		msg.Type = messageTypeFor(sender.Type)
+	}
+	if strings.TrimSpace(msg.To) == "" {
+		s.sendError(sender, "message target is required")
+		return
+	}
+
+	target, ok := s.hub.Get(msg.To)
+	if !ok {
+		s.sendError(sender, fmt.Sprintf("target not found: %s", msg.To))
+		return
+	}
+
+	payload, err := proto.Marshal(&msg)
+	if err != nil {
+		s.sendError(sender, "failed to serialize routed message")
+		return
+	}
+
+	if err := target.WriteMessage(websocket.BinaryMessage, payload, time.Now().Add(writeWait)); err != nil {
+		s.sendError(sender, fmt.Sprintf("failed to route message to %s", msg.To))
+	}
+}
+
+func (s *Server) sendError(target *hub.Connection, message string) {
+	msg := &protocol.Message{
+		From:    "server",
+		To:      target.ID,
+		Type:    "error",
+		Action:  "error",
+		Payload: []byte(message),
+	}
+	payload, err := proto.Marshal(msg)
+	if err != nil {
+		log.Printf("failed to serialize websocket error response: target=%s err=%v", target.ID, err)
+		return
+	}
+	if err := target.WriteMessage(websocket.BinaryMessage, payload, time.Now().Add(writeWait)); err != nil {
+		log.Printf("failed to send websocket error response: target=%s err=%v", target.ID, err)
+	}
+}
+
+func messageTypeFor(senderType string) string {
+	switch senderType {
+	case hub.ConnectionTypeAgent:
+		return "agent2client"
+	case hub.ConnectionTypeClient:
+		return "client2agent"
+	default:
+		return ""
 	}
 }
 
@@ -117,8 +188,7 @@ func heartbeat(connection *hub.Connection, done <-chan struct{}) {
 	for {
 		select {
 		case <-ticker.C:
-			_ = connection.Conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := connection.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := connection.WriteMessage(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
 				_ = connection.Conn.Close()
 				return
 			}
